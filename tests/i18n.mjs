@@ -1,5 +1,5 @@
-// 离线自检（只读，不写不删任何真实文件）：打桩加载浏览器半 lib/client.js，真跑 apply() 与两个菜单组件，
-// 验中英词表是否齐全、切语言后文案是否跟着变、服务端错误码是否都能渲染成人话。
+// 离线自检（只读，不写入或删除任何真实文件）：以打桩方式加载浏览器半 lib/client.js，实际运行 apply() 与两个菜单组件，
+// 验证中英词表是否齐全、切换语言后文案是否随之变化、服务端错误码是否均能渲染为可读文本。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,20 +30,20 @@ const reactStub = {
   useRef: (v) => ({ current: v }),
   useMemo: (fn) => fn(),
 };
-const fakeRequire = (name) => {
+const stubRequire = (name) => {
   if (name === 'react') return reactStub;
   if (name === 'react-dom/client') return { createRoot: () => ({ render() {}, unmount() {} }) };
   throw new Error('stub 未提供：' + name);
 };
 
-// 用 Function 包一层，让 window 指向我们的桩；顺带把内部函数挂到导出上供测试调用
+// 以 Function 包裹一层，使 window 指向本脚本的桩；同时将内部函数挂到导出上供测试调用。
 const patched = src.replace(
   'return module.exports;',
   'exports.__renderFailure = renderFailure; exports.__t = t; return module.exports;'
 );
 new Function('window', patched)(global.window);
 if (!captured) { console.log('FAIL 没抓到模块定义'); process.exit(1); }
-const mod = captured.factory(fakeRequire);
+const mod = captured.factory(stubRequire);
 
 const localeDicts = {};
 const registeredSlots = {};
@@ -77,7 +77,7 @@ const slotsStub = {
 ctx.slots = slotsStub;
 
 mod.apply(ctx);
-// 首次 apply 的注册选项单独留一份：后面几处 apply() 会复用同一个 slotsStub 并覆盖 registeredOptions。
+// 单独保留首次 apply 的注册选项：后续几处 apply() 会复用同一个 slotsStub 并覆盖 registeredOptions。
 const firstOptions = { ...registeredOptions };
 
 let fails = 0;
@@ -86,7 +86,7 @@ const check = (ok, label, extra) => {
   else console.log('ok   ' + label + (extra ? '  ' + extra : ''));
 };
 
-// 1 词表注册到了官方 locale 服务
+// 1 词表已注册到官方 locale 服务
 check(Object.keys(localeDicts).length === 1, '词表已注册', Object.keys(localeDicts).join(','));
 const dicts = localeDicts['dsh-session-remover'];
 check(!!dicts && !!dicts.zh && !!dicts.en, '中英两份词表都在');
@@ -99,7 +99,7 @@ const missingZh = enKeys.filter((k) => !(k in dicts.zh));
 check(missingEn.length === 0, '中文有、英文缺的键 = 0', missingEn.join(','));
 check(missingZh.length === 0, '英文有、中文缺的键 = 0', missingZh.join(','));
 
-// 3 同键的占位符名字一致（漏一个就会显示成 {count}）
+// 3 同键的占位符名字一致（遗漏一个将显示为 {count}）
 const ph = (s) => (s.match(/\{(\w+)\}/g) || []).sort().join(',');
 let phBad = [];
 for (const k of zhKeys) {
@@ -108,16 +108,16 @@ for (const k of zhKeys) {
 }
 check(phBad.length === 0, '占位符中英一致', phBad.join(' | '));
 
-// 4 英文里不该再有汉字
+// 4 英文中不应再出现汉字
 const han = /[\u4e00-\u9fff]/;
 const enWithHan = enKeys.filter((k) => han.test(dicts.en[k]));
 check(enWithHan.length === 0, '英文词表无汉字残留', enWithHan.join(','));
 
-// 5 两个菜单项都注册上了
+// 5 两个菜单项均已注册
 check(!!registeredSlots['dsh-session-remover/delete'], '单条删除菜单项已注册');
 check(!!registeredSlots['dsh-session-remover/batch-delete'], '批量删除菜单项已注册');
 
-// 6 真调组件：中文界面
+// 6 实际调用组件：中文界面
 const labelOf = (C) => {
   const out = C({ sessionId: 's-1', displayTitle: 'T' });
   return out && out.kids ? out.kids[0] : undefined;
@@ -127,7 +127,7 @@ const batZh = labelOf(registeredSlots['dsh-session-remover/batch-delete']);
 check(delZh === '删除对话', '中文界面：单条菜单文案', String(delZh));
 check(batZh === '批量删除…', '中文界面：批量菜单文案', String(batZh));
 
-// 7 切到英文，走官方 locale 的 subscribe 通知
+// 7 切换到英文，经官方 locale 的 subscribe 通知
 active = 'en';
 if (subscribeFn) subscribeFn();
 const delEn = labelOf(registeredSlots['dsh-session-remover/delete']);
@@ -158,7 +158,7 @@ check(loKeys.length >= 5, '残留项词条数 ≥ 5', String(loKeys.length));
 const enErrWithHan = errKeys.concat(loKeys).filter((k) => han.test(dicts.en[k]));
 check(enErrWithHan.length === 0, '错误码英文词条无汉字', enErrWithHan.join(','));
 
-// 11 真跑服务端返回的失败结构，看是否渲染成人话（含嵌套 reason 递归）
+// 11 实际运行服务端返回的失败结构，检查是否渲染为可读文本（含嵌套 reason 递归）
 const inner = { ok: false, code: 'E_SESSION_ROOT_UNREADABLE', params: { reason: 'ENOENT' } };
 const outer = { ok: false, code: 'E_INDEX_UNREADABLE', params: { reason: inner } };
 check(typeof mod.__renderFailure === 'function', '模块暴露了 renderFailure 供测试');
@@ -177,13 +177,13 @@ active = 'en'; if (subscribeFn) subscribeFn();
 const loEn = mod.__renderFailure({ code: 'L_SESSION_LEFTOVER', params: { id: 'session-1', what: 'L_SESSION_DIR' } });
 check(loEn.includes('session-1') && han.test(loEn) === false, '残留项英文渲染无汉字', loEn);
 
-// 12 未知码不炸、退回码本身
+// 12 未知码不抛异常，退回码本身
 const unk = mod.__renderFailure({ code: 'E_NOT_A_REAL_CODE' });
 check(unk === 'E_NOT_A_REAL_CODE', '未知码退回码本身', unk);
 check(mod.__renderFailure(null) === '', 'null 安全');
 check(mod.__renderFailure('plain') === 'plain', '纯字符串原样透传');
 
-// 13 端到端：宿主半的 28 个失败码逐个过一遍浏览器半的词表
+// 13 端到端：宿主半的全部失败码逐个过一遍浏览器半词表
 active = 'zh'; if (subscribeFn) subscribeFn();
 const allCodes = ['E_SESSION_ROOT_UNREADABLE', 'E_WORKSPACE_DIR_UNREADABLE', 'E_REGISTRY_UNAVAILABLE',
   'E_SESSION_IDS_NOT_ARRAY', 'E_ARCHIVED_NOT_ARRAY', 'E_REGISTRY_READ_FAILED', 'E_PROTECTED_LIST_UNREADABLE',
@@ -196,7 +196,7 @@ const allCodes = ['E_SESSION_ROOT_UNREADABLE', 'E_WORKSPACE_DIR_UNREADABLE', 'E_
 const bare = allCodes.filter((c) => mod.__renderFailure({ code: c }) === c);
 check(bare.length === 0, allCodes.length + ' 个失败码在中文下都有词条', bare.join(','));
 
-// 14 官方 t 查不到词条时会把 key 原样返回，菜单项必须当作没取到并退回模块内词表
+// 14 官方 t 查不到词条时会将 key 原样返回，菜单项须视为未取到并退回模块内词表
 {
   const Comp = registeredSlots['dsh-session-remover/delete'];
   const labelWith = (tFn) => {
@@ -212,7 +212,7 @@ check(bare.length === 0, allCodes.length + ' 个失败码在中文下都有词�
   check(labelWith(throwing) === '删除对话', '官方 t 抛错时退回模块内词表');
 }
 
-// 15 locale 服务在场时才声明 locale 字段（否则官方渲染该条目会抛错，侧栏整条报错）
+// 15 仅当 locale 服务在场时才声明 locale 字段（否则官方渲染该条目将抛出异常，整条侧栏报错）
 {
   const del = firstOptions['dsh-session-remover/delete'];
   const bat = firstOptions['dsh-session-remover/batch-delete'];
@@ -235,7 +235,7 @@ check(bare.length === 0, allCodes.length + ' 个失败码在中文下都有词�
   check(o && o.locale === undefined, 'locale 缺失：条目不声明 locale（避免官方渲染报错）', JSON.stringify(o));
 }
 
-// 17 订阅失败不废掉已注册成功的词表（两处独立降级）
+// 17 订阅失败不影响已注册成功的词表（两处独立降级）
 {
   const slots3 = { inject: (n, cb) => { cb(); return () => {}; }, register: (o, C) => { registeredOptions['s-' + o.id] = o; return () => {}; } };
   const ctx3 = {

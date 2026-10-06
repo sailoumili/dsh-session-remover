@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-remover",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DSH 插件：在侧栏会话行的「…」菜单中增加「删除对话」与「批量删除…」，将对话及其子代理会话移入 Windows 回收站，可从回收站还原。",
   "keywords": [
     "dsh",

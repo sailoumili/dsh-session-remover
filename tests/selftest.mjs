@@ -1,5 +1,5 @@
-// 离线自检（只读，绝不删任何东西）。原理：把插件源码复制一份、追加内部函数的导出再动态 import，
-// 这样发布件的导出面保持干净，自检仍能直接调用内部函数。
+// 离线自检（只读，不删除任何文件）。原理：复制一份插件源码并追加内部函数的导出后再动态 import，
+// 使发布件的导出面保持干净，同时自检仍可直接调用内部函数。
 
 import fs from "node:fs";
 import os from "node:os";
@@ -16,13 +16,14 @@ const STORAGES = path.join(DSH_HOME, "storages");
 
 const norm = (id) => String(id).replace(/^session-/, "");
 const key = (id) => "session-" + norm(id);
-// 失败结构是「错误码 + 参数」，打印时摊平成一行，便于人工看。
+// 失败结构为「错误码 + 参数」，打印时摊平成一行，便于人工查看。
 const why = (x) => (x ? [x.code ?? x.error, x.params && Object.keys(x.params).length ? JSON.stringify(x.params) : ""].filter(Boolean).join(" ") : "");
 
 const PROBE_EXPORTS = [
   "collectSessionTree", "indexSessionsOnDisk", "findSessionDirs", "permanentSessionKeys",
   "requestRejection", "recycleScript", "recycleBinMove", "isInside", "auditLeftover",
-  "deleteSessionCore",
+  "deleteSessionCore", "recycleIndexSnapshot", "recycleOriginalPath", "verifyRecycled", "salvageMoved",
+  "recycledAll", "recycleBinUsable", "volumeRootOf",
 ];
 
 function loadPlugin() {
@@ -208,7 +209,7 @@ console.log("\n[测试5] 访问围栏（requestRejection）");
 console.log("\n[测试6] 回收站脚本（recycleScript）");
 {
   const tricky = [
-    "C:\\Users\\a b\\会话 目录\\aaaaaaaa-1111-2222-3333-444444444444",
+    "C:\\sessions\\a b\\会话 目录\\aaaaaaaa-1111-2222-3333-444444444444",
     "C:\\x\\it's\\bbbbbbbb-1111-2222-3333-444444444444",
   ];
   const text = mod.recycleScript(tricky, "C:\\t\\r.txt");
@@ -220,11 +221,12 @@ console.log("\n[测试6] 回收站脚本（recycleScript）");
   check("带超时上限，不会无限等", text.includes("var deadline") && text.includes("WScript.Sleep(200)"));
   check("脚本以 CRLF 分行（cscript 对换行敏感）", text.includes("\r\n") && !/[^\r]\n/.test(text));
   check("回收站被关掉时先拒绝（不静默永久删）", text.includes("NukeOnDelete") && text.includes('write("NUKE'));
-  // Windows 把「不移到回收站」存在卷级键上（回收站属性按驱动器逐个勾选），只读根键会让闸门失效。
+  // Windows 将「不移到回收站」存于卷级键（回收站属性按驱动器逐个勾选），仅读根键将使闸门失效。
   check("按卷查 NukeOnDelete（盘符 → Win32_Volume 的卷 GUID）", text.includes("Win32_Volume") && text.includes("volumeKeyOf"));
   check("卷级读不到时退回根键值（兼容旧版）", text.includes("ROOT_KEY") && text.includes("isNukeOn"));
-  check("移完按「原位置 + 名字」回回收站点名核对", text.includes("GetDetailsOf") && text.includes("matched++"));
-  check("点名核对逐项容错（个别项抛错不带塌整轮）", text.includes("catch (err2)"));
+  // 核对已移至 node 侧直读 $Recycle.Bin 的 $I 索引：Shell 全量枚举在项数多时会将 cscript 拖过超时并被终止。
+  check("脚本不再枚举回收站（超时的根源）", text.includes("bin.Items()") === false);
+  check("脚本不再回传 matched（核对已移到 node 侧）", text.includes('write("RS|" + left + "|"') && text.includes("GetDetailsOf") === false);
   check("不再做多余的两次计数（省掉每次删除约 2 秒）", text.includes("function count()") === false);
   check("脚本能被 JSON.parse 回路径数组", (() => {
     const m = text.match(/^var paths = (.*);$/m);
@@ -244,7 +246,7 @@ console.log("\n[测试6.5] 卷级 NukeOnDelete 判定（真跑 cscript，只读�
   if (cut < 0) {
     check("脚本里能找到搬移起点", false, "Shell.Application 未出现");
   } else {
-    // 只保留「判定」部分，把 MoveHere 及其后的动作全部砍掉，确保这条测试绝不搬文件。
+    // 仅保留「判定」部分，将 MoveHere 及其后的动作全部去除，确保本条测试不移动任何文件。
     const judge = full.slice(0, cut) + [
       'var out = "F:" + (isNukeOn(paths[0]) ? "NUKE" : "OK");',
       'var vk = volumeKeyOf(paths[0]);',
@@ -271,6 +273,61 @@ console.log("\n[测试6.5] 卷级 NukeOnDelete 判定（真跑 cscript，只读�
       for (const f of [scriptFile, resultFile]) { try { fs.rmSync(f, { force: true }); } catch {} }
     }
   }
+}
+
+console.log("\n[测试6.6] 回收站索引核对（真读 $Recycle.Bin，只读，不搬任何文件）");
+{
+  const t0 = Date.now();
+  const snap = mod.recycleIndexSnapshot();
+  const cost = Date.now() - t0;
+  check("能读出回收站索引（$I 文件集合）", snap instanceof Set && snap.size > 0, `size=${snap.size}`);
+  check("索引耗时远低于 Shell 枚举（<5 秒）", cost < 5000, `${cost}ms / ${snap.size} 项`);
+
+  let parsed = 0, clean = 0;
+  for (const f of snap) {
+    const p = mod.recycleOriginalPath(f);
+    if (p) { parsed++; if (/^[A-Za-z]:\\/.test(p) && !p.includes("\u0000")) clean++; }
+  }
+  check("能解析出原始路径", parsed > 0, `解析成功 ${parsed}/${snap.size}`);
+  // 偏移写错将解析出带杂字符的路径（$I 的 24-27 为字符数，路径自 28 起），此处逐条严格校验。
+  check("解析结果干净（盘符开头、无 \\u0000 杂字符）", clean === parsed, `干净 ${clean}/${parsed}`);
+
+  // 差集语义：将当前索引整体作为 before 时新增为空，不应命中任何一条（旧项不得冒充本次搬移）。
+  const none = mod.verifyRecycled(snap, ["C:\\no-such-session\\x"]);
+  check("差集为空时不误判（旧项不算这次新增）", none.matched === 0 && none.added === 0, JSON.stringify(none));
+
+  // 名字对不上即不应放行：宁可报失败，也不得将未搬成功者判为成功。
+  const miss = mod.verifyRecycled(new Set(), ["C:\\no-such-session\\x"]);
+  check("名字对不上 → matched=0（不误报成功）", miss.matched === 0, JSON.stringify(miss));
+  check("salvage 对没搬成功的路径返回 null", mod.salvageMoved(new Set(), ["C:\\no-such-session\\session-00000000-0000-0000-0000-000000000000"]) === null);
+
+  // 正例：取回收站中真实存在的一条 $I，将其余项视为「搬移前已有」，该条应被认作本次新增并命中。
+  // 上述两条反向用例恒真（差集为空必不命中、路径不存在必不命中），无法证明「真搬成功可被识别」。
+  const real = [...snap]
+    .map((f) => ({ f, p: mod.recycleOriginalPath(f) }))
+    .find((x) => /^[A-Za-z]:\\/.test(x.p) && !x.p.includes("\u0000"));
+  if (real) {
+    const before = new Set(snap);
+    before.delete(real.f);
+    const hit = mod.verifyRecycled(before, [real.p]);
+    check("正例：真实回收站项能被认出来（matched=1）", hit.matched === 1 && hit.added === 1, `${JSON.stringify(hit)} ← ${real.p}`);
+    // 去重：同一条新增 $I 只计一个目标，否则将顶替另一个未搬移成功的目录（误报成功）。
+    const dup = mod.verifyRecycled(before, [real.p, real.p]);
+    check("去重：同路径当两个目标时 matched 只算 1", dup.matched === 1, JSON.stringify(dup));
+  } else {
+    check("正例：回收站里有可解析的真实项", false, "本机回收站索引里没有可解析的项");
+  }
+}
+
+console.log("\n[测试6.7] 搬移前的回收站可用性闸门（只读，不删任何文件）");
+{
+  const homeDir = path.join(os.homedir(), ".dsh", "sessions", "probe");
+  check("本地卷有 $Recycle.Bin → 放行", mod.recycleBinUsable(homeDir) === true, `${homeDir} → ${mod.volumeRootOf(homeDir)}`);
+  check("网络路径（UNC）→ 拒绝", mod.recycleBinUsable("\\\\server\\share\\sessions\\x") === false);
+  check("不存在的盘符 → 拒绝", mod.recycleBinUsable("Q:\\sessions\\x") === false);
+  check("盘符解析：UNC 取不到卷根", mod.volumeRootOf("\\\\server\\share\\x") === "");
+  // 双条件判据：索引全部命中但原路径仍存在于磁盘上时，不算搬移成功。
+  check("索引全中但原路径仍在 → 不算成功", mod.recycledAll(new Set(), ["C:\\no-such-session\\x"]) === false);
 }
 
 console.log("\n[测试7] 路径围栏（isInside）");
@@ -317,12 +374,12 @@ console.log("\n[测试9] 旧功能已彻底移除（静态检查）");
 console.log("\n[测试9.5] 服务端失败一律为「错误码 + 参数」，不含面向界面的中文");
 {
   const src = fs.readFileSync(PLUGIN, "utf8");
-  // 宿主半不许再产出自然语言：界面文案归浏览器半的词表，否则英文界面下会冒出中文。
+  // 宿主半不得再产出自然语言：界面文案归浏览器半词表，否则英文界面下将显示中文。
   const hanInError = [...src.matchAll(/(?:error|reason)\s*:\s*"[^"]*[\u4e00-\u9fff][^"]*"/g)].map((m) => m[0]);
   check("宿主半不再出现中文字面量的 error/reason", hanInError.length === 0, hanInError.join(" | "));
   const codes = [...src.matchAll(/fail\("([A-Z0-9_]+)"/g)].map((m) => m[1]);
   check("宿主半的失败码数量 ≥ 25", codes.length >= 25, String(codes.length));
-  // 每个宿主半失败码都必须在浏览器半有对应词条，否则界面上会露出裸码。
+  // 每个宿主半失败码都必须在浏览器半有对应词条，否则界面将显示错误码原文。
   const clientSrc = fs.readFileSync(path.join(HERE, "..", "lib", "client.js"), "utf8");
   const missing = [...new Set(codes)].filter((c) => clientSrc.includes('"err.' + c + '"') === false);
   check("宿主半每个失败码都有界面词条", missing.length === 0, missing.join(","));
@@ -335,7 +392,7 @@ console.log("\n[测试10] 整条删除流程（假 DSH_HOME + 假会话树，真
 {
   const saved = process.env.DSH_HOME;
   const home = path.join(os.tmpdir(), `sd-flow-${process.pid}`);
-  const slug = path.join(home, "sessions", "--F-fake-workspace--");
+  const slug = path.join(home, "sessions", "--F-test-workspace--");
   const parentId = "session-11111111-1111-1111-1111-111111111111";
   const childA = "session-22222222-2222-2222-2222-222222222222";
   const childB = "session-33333333-3333-3333-3333-333333333333";
@@ -347,16 +404,16 @@ console.log("\n[测试10] 整条删除流程（假 DSH_HOME + 假会话树，真
     return dir;
   };
   fs.mkdirSync(slug, { recursive: true });
-  const dirParent = mkSession(parentId, { type: "session", id: parentId, cwd: "F:\\fake" });
-  const dirA = mkSession(childA, { type: "session", id: childA, cwd: "F:\\fake", origin: "subagent", parentSession: parentId });
-  const dirB = mkSession(childB, { type: "session", id: childB, cwd: "F:\\fake", origin: "subagent", parentSession: parentId });
+  const dirParent = mkSession(parentId, { type: "session", id: parentId, cwd: "F:\\test-workspace" });
+  const dirA = mkSession(childA, { type: "session", id: childA, cwd: "F:\\test-workspace", origin: "subagent", parentSession: parentId });
+  const dirB = mkSession(childB, { type: "session", id: childB, cwd: "F:\\test-workspace", origin: "subagent", parentSession: parentId });
 
   process.env.DSH_HOME = home;
   try {
     const detached = [];
     const unarchiveCalls = [];
     const accounted = [parentId];
-    // 只保留 rc.2 里真实存在的存储域：message_feedback 已改为会话日志权威，不再是存储域。
+    // 仅保留 rc.2 中真实存在的存储域：message_feedback 已改为以会话日志为权威，不再是存储域。
     const rows = { session_projcache: new Set([short(parentId), short(childA), short(childB)]) };
     const table = (name) => ({
       get: (id) => (rows[name].has(short(id)) ? { id } : undefined),
@@ -367,7 +424,7 @@ console.log("\n[测试10] 整条删除流程（假 DSH_HOME + 假会话树，真
       _archived: [parentId],
       get(name) {
         if (name === "workspaceRegistry") {
-          // 现实中子代理不进工作区记账（记账里只有主会话），且 detachSession 会真的把这一行去掉。
+          // 实际情形中子代理不进工作区记账（记账中仅有主会话），且 detachSession 会确实移除该行。
           return {
             list: () => [{
               get sessionIds() { return accounted; },
@@ -405,7 +462,7 @@ console.log("\n[测试10] 整条删除流程（假 DSH_HOME + 假会话树，真
     check("归档集已摘除", ctx10._archived.length === 0, JSON.stringify(ctx10._archived));
     check("归档集摘除走的是公开接口 unarchiveSession", unarchiveCalls.length === 1 && unarchiveCalls[0] === parentId, JSON.stringify(unarchiveCalls));
     check("投影缓存三行全清", rows.session_projcache.size === 0);
-    // 插件只清 rc.2 里真实存在的存储域，不再碰 message_feedback（它已不是存储域）。
+    // 插件仅清理 rc.2 中真实存在的存储域，不再涉及 message_feedback（其已非存储域）。
     check("不再尝试清理不存在的 message_feedback 存储域", rows.message_feedback === undefined);
     check("审计判定干净、无警告", r.clean === true && r.warnings.length === 0, JSON.stringify({ leftover: r.leftover, warnings: r.warnings }));
 
