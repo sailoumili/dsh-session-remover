@@ -1,0 +1,4 @@
+# bundle patch：只插入本插件入口行；name 用包名，loader 据此解析宿主半 lib/index.js。
+- insert:
+    - id: dsh-session-remover
+      name: 'dsh-session-remover'

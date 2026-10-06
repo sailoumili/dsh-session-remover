@@ -1,0 +1,77 @@
+{
+  "name": "dsh-session-remover",
+  "version": "1.0.0",
+  "description": "DSH 插件：在侧栏会话行的「…」菜单中增加「删除对话」与「批量删除…」，将对话及其子代理会话移入 Windows 回收站，可从回收站还原。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-plugins",
+    "deepseek-harness",
+    "deepseek",
+    "cordis",
+    "cordis-plugin",
+    "session",
+    "session-remover",
+    "session-delete",
+    "delete-session",
+    "delete-conversation",
+    "conversation",
+    "conversation-delete",
+    "batch-delete",
+    "batch-deletion",
+    "sidebar",
+    "context-menu",
+    "recycle-bin",
+    "cleanup",
+    "subagent",
+    "windows",
+    "web",
+    "agent",
+    "llm",
+    "删除对话",
+    "删除会话",
+    "批量删除",
+    "侧栏",
+    "会话管理",
+    "回收站"
+  ],
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sailoumili/dsh-session-remover.git"
+  },
+  "homepage": "https://github.com/sailoumili/dsh-session-remover#readme",
+  "bugs": {
+    "url": "https://github.com/sailoumili/dsh-session-remover/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}

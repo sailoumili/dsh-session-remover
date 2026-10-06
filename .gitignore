@@ -1,0 +1,19 @@
+# 依赖
+node_modules/
+
+# 打包产物（发 GitHub Release 用，不入库）
+release/
+
+# 开发过程留档（含本机路径与内部工作流引用，不入库；npm 侧本就由 files 白名单排除）
+docs/
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
