@@ -24,6 +24,7 @@ const PROBE_EXPORTS = [
   "requestRejection", "recycleScript", "recycleBinMove", "isInside", "auditLeftover",
   "deleteSessionCore", "recycleIndexSnapshot", "recycleOriginalPath", "verifyRecycled", "salvageMoved",
   "recycledAll", "recycleBinUsable", "volumeRootOf",
+  "isValidSessionId", "sessionKey", "idVariants",
 ];
 
 function loadPlugin() {
@@ -33,7 +34,12 @@ function loadPlugin() {
   }
   const probe = path.join(os.tmpdir(), `session-delete-probe-${process.pid}.mjs`);
   const src = fs.readFileSync(PLUGIN, "utf8");
-  fs.writeFileSync(probe, src + `\nexport { ${PROBE_EXPORTS.join(", ")} };\n`, "utf8");
+  // 只导出源文件里确实存在的函数：旧版缺少某个内部函数时，应让相关用例判 FAIL 并给出可读原因，
+  // 而不是让整个自检在 import 阶段崩掉、看不到任何结论。
+  const present = PROBE_EXPORTS.filter((n) => new RegExp(`(?:function|const|let|var)\\s+${n}\\b`).test(src));
+  const missing = PROBE_EXPORTS.filter((n) => !present.includes(n));
+  if (missing.length > 0) console.log(`（提示：源文件不含 ${missing.join(", ")}，相关用例将判失败）`);
+  fs.writeFileSync(probe, src + `\nexport { ${present.join(", ")} };\n`, "utf8");
   return probe;
 }
 
@@ -471,6 +477,73 @@ console.log("\n[测试10] 整条删除流程（假 DSH_HOME + 假会话树，真
   } finally {
     process.env.DSH_HOME = saved;
     try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
+  }
+}
+
+console.log("\n[测试11] 非 session-<uuid> 形状的编号（微信通道 / agent-loop / webhook）");
+// 微信通道自铸 `session-<短号>-<uuid>`（短号即 uuid 首段，故首段重复出现），
+// agent-loop 为 `<id>-session-<uuid>`，webhook 为 `webhook-<uuid>`。
+// 旧版把编号锁死为单个 UUID，上述编号在入口即被判为 E_SESSION_ID_INVALID，删除完全无法进行。
+{
+  const wechat = "session-7f3a91c2-7f3a91c2-4d18-9be2-5c0a1e7d3f88";
+  const loop = "desktop-session-2b6e4471-8a30-4f5d-9c11-6e0d2a9b7c34";
+  const hook = "webhook-9d5c1180-3e27-4a6b-8f02-1b7c4e5d9a63";
+  const bad = ["..", ".", "", "session-../../etc", "..\\..\\Windows", "session-a/b", "C:\\Users\\x", "session-~002E~002E"];
+
+  // 旧版没有导出这几个内部函数；缺任何一个都说明编号校验尚未放宽，直接判失败并跳过后续依赖项。
+  const hasHelpers = typeof mod.isValidSessionId === "function"
+    && typeof mod.sessionKey === "function"
+    && typeof mod.idVariants === "function";
+  check("导出 isValidSessionId / sessionKey / idVariants（旧版无此三者 → 编号仍被锁死）", hasHelpers);
+
+  if (!hasHelpers) {
+    console.log("  （缺少上述内部函数，跳过本组其余校验与端到端删除）");
+  } else {
+  const accepted = [wechat, loop, hook].filter((id) => mod.isValidSessionId(id));
+  check("三类真实编号全部放行", accepted.length === 3, JSON.stringify(accepted));
+  check("微信编号首段重复（短号 + uuid）仍放行", mod.isValidSessionId(wechat));
+  check("越权路径一律拒绝", bad.every((id) => mod.isValidSessionId(id) === false), JSON.stringify(bad.filter(mod.isValidSessionId)));
+  check("sessionKey 归一化补前缀", mod.sessionKey("abc") === "session-abc" && mod.sessionKey("session-abc") === "session-abc");
+  check("idVariants 含带前缀与裸编号两种", mod.idVariants(wechat).includes(wechat) && mod.idVariants(wechat).includes(wechat.replace(/^session-/, "")));
+
+  // 端到端：用微信形状的编号真跑一遍删除，确认能真正移入回收站。
+  const saved = process.env.DSH_HOME;
+  const home = path.join(os.tmpdir(), `sd-selftest-wechat-${process.pid}`);
+  const cwd = path.join(home, "ws");
+  const slug = `--${cwd.replace(/[:\\/]/g, "-").replace(/^-+/, "")}--`;
+  const dirWechat = path.join(home, "sessions", slug, wechat);
+  const childId = "session-3c8f27a1-6b04-4e29-9d75-2a1f8e6b0c93";
+  const dirChild = path.join(home, "sessions", slug, childId);
+  const header = (id, extra) => JSON.stringify({ type: "session", id, ...extra });
+  const writeLog = (dir, line) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "session.v4.jsonl.zstd"), zlib.zstdCompressSync(Buffer.from(line + "\n", "utf8")));
+  };
+  try {
+    process.env.DSH_HOME = home;
+    writeLog(dirWechat, header(wechat));
+    writeLog(dirChild, header(childId, { origin: "subagent", parentSession: wechat }));
+    fs.mkdirSync(path.join(home, "storages"), { recursive: true });
+
+    const ctx11 = {
+      get(name) {
+        if (name === "workspaceRegistry") {
+          return { list: () => [], requireState: () => ({ archivedSessionIds: [] }), enqueueOperation: async (f) => f(), setState: async () => {} };
+        }
+        return undefined;
+      },
+      logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const before = mod.recycleIndexSnapshot().size;
+    const r = await mod.deleteSessionCore(ctx11, wechat);
+    check("微信编号：删除返回 ok", r.ok === true, why(r));
+    check("微信编号：连带子代理一并收走", r.ok === true && r.sessions === 2, `sessions=${r?.sessions}`);
+    check("微信编号：目录已离开磁盘", !fs.existsSync(dirWechat) && !fs.existsSync(dirChild));
+    check("微信编号：确实进了回收站", mod.recycleIndexSnapshot().size > before, `before=${before} after=${mod.recycleIndexSnapshot().size}`);
+  } finally {
+    process.env.DSH_HOME = saved;
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
+  }
   }
 }
 

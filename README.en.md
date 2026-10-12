@@ -45,6 +45,7 @@ dsh plugin --profile desktop add dsh-session-remover
 
 - **Deletion moves the data to the recycle bin; it does not erase it.** The move stays on the same volume, so no data is copied and nothing is left behind in `.dsh`. Before deleting, the plugin checks two things on the volume that holds the session (Windows stores the recycle-bin setting per drive): whether the recycle bin has been disabled, and whether the volume has a usable recycle bin at all; if either check fails the plugin **refuses to delete** rather than falling back to permanent deletion. Afterwards each item is verified by original location and name; the verification reads the local recycle bin index directly (listing file names only, not reading each entry), so its cost is essentially independent of how many items the bin already holds.
 - **Subagent sessions are removed together.** Subagent sessions are not shown in the sidebar or search, so they accumulate unless removed together. Forked conversations are independent and are **never** deleted along with their source.
+- **Every session-id shape is supported.** The plugin does not assume that an id is always `session-<uuid>`. WeChat conversations (`session-<short>-<uuid>`), subagent and forked sessions (`<id>-session-<uuid>`), and webhook sessions (`webhook-<uuid>`) are all handled.
 - **Three records are cleaned:** the projection cache, the workspace registry, and the archived set. The projection cache is derived data that DSH rebuilds after a restore; the other two are cleared to avoid leaving traces locally, at the cost of a restored conversation being filed under "Ungrouped" in the sidebar.
 - **Deleting the currently open conversation is supported.** Its running task is stopped and flushed to disk first, and no DSH restart is required.
 
@@ -59,6 +60,13 @@ dsh plugin --profile desktop add dsh-session-remover
 - **The endpoint accepts loopback requests only.** `/api/session.delete` allows only `127.0.0.1` / `localhost` / `[::1]` and returns 403 for LAN origins. The plugin registers its route outside the official authentication fence, while the official browser-cookie check depends on a signing secret the plugin cannot obtain; deleting data is high-risk, so it fails closed. If DSH is bound to `0.0.0.0` and accessed from another machine, deletion returns 403.
 - **Nothing is touched when the session directory cannot be read.** A failed session-tree scan aborts the deletion as a whole and never treats "read failure" as "absent from disk".
 - The batch delete panel does not trap focus; `Tab` may move to page elements behind the panel.
+
+## Changelog
+
+### 1.0.2
+
+- Fixed the inability to delete WeChat conversations (and the conversations under a WeChat workspace). The session id had been constrained to `session-<uuid>`, while the WeChat channel mints `session-<short>-<uuid>` (the short part being the first uuid group), so the request was rejected as an invalid id with HTTP 400 before any deletion logic ran. Validation now only enforces a conservative "looks like a session id and contains no path separator, `.` or `..`" rule, which admits every channel's id shape while still refusing traversal paths.
+- Extracted id normalisation into `sessionKey()`, replacing the scattered `"session-" + id.replace(/^session-/, "")` constructions.
 
 ## License
 
