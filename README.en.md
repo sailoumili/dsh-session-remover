@@ -3,6 +3,7 @@
 Adds "Delete conversation" and "Batch delete…" to the sidebar session row "…" menu, moving a conversation and its subagent sessions into the Windows recycle bin, from which they can be restored.
 
 - Package: `dsh-session-remover`
+- Version: `1.0.2`
 - Repository: <https://github.com/sailoumili/dsh-session-remover>
 - Compatible with DSH 0.1.7 and later; available for the web and desktop editions
 - Interface text follows the DSH interface language; Chinese and English are both provided
@@ -10,27 +11,17 @@ Adds "Delete conversation" and "Batch delete…" to the sidebar session row "…
 
 ## Installation
 
-### Web
-
 1. Click **Plugins** in the left sidebar.
 2. Click **Add plugin**.
-3. Enter `dsh-session-remover` in the package field, click **Install**, and wait for the installation to complete.
-4. Enable the plugin on its page.
-5. Restart DSH.
+3. Enter the following in the package field:
 
-Equivalent command line:
+   ```text
+   dsh-session-remover
+   ```
 
-```cmd
-dsh plugin --profile web add dsh-session-remover
-```
-
-### Desktop
-
-The desktop edition uses a separate plugin manifest (`~/.dsh/profiles/desktop`) and is independent of the web edition, so it requires a separate installation. The steps are identical: sidebar **Plugins** → **Add plugin** → enter the package name → **Install** → enable → restart.
-
-```cmd
-dsh plugin --profile desktop add dsh-session-remover
-```
+4. Click **Install** and wait for the installation to complete.
+5. Enable the plugin on its page.
+6. Restart DSH.
 
 ## Usage
 
@@ -45,6 +36,7 @@ dsh plugin --profile desktop add dsh-session-remover
 
 - **Deletion moves the data to the recycle bin; it does not erase it.** The move stays on the same volume, so no data is copied and nothing is left behind in `.dsh`. Before deleting, the plugin checks two things on the volume that holds the session (Windows stores the recycle-bin setting per drive): whether the recycle bin has been disabled, and whether the volume has a usable recycle bin at all; if either check fails the plugin **refuses to delete** rather than falling back to permanent deletion. Afterwards each item is verified by original location and name; the verification reads the local recycle bin index directly (listing file names only, not reading each entry), so its cost is essentially independent of how many items the bin already holds.
 - **Subagent sessions are removed together.** Subagent sessions are not shown in the sidebar or search, so they accumulate unless removed together. Forked conversations are independent and are **never** deleted along with their source.
+- **The session directory is located by session id.** The id recorded in the session log header is authoritative. If one id maps to more than one session directory (for example a bare id and a directory with the `session-` prefix side by side), the directory whose name equals the requested id exactly is deleted; when a unique target cannot be determined, the plugin **refuses to delete** and reports an error without changing any data.
 - **Three records are cleaned:** the projection cache, the workspace registry, and the archived set. The projection cache is derived data that DSH rebuilds after a restore; the other two are cleared to avoid leaving traces locally, at the cost of a restored conversation being filed under "Ungrouped" in the sidebar.
 - **Deleting the currently open conversation is supported.** Its running task is stopped and flushed to disk first, and no DSH restart is required.
 
@@ -53,9 +45,8 @@ dsh plugin --profile desktop add dsh-session-remover
 - **Windows only.** Moving to the recycle bin relies on the system script host `cscript.exe`, which ships with Windows; on other systems the plugin refuses to delete and reports an error rather than falling back to permanent deletion.
 - **Deletion is refused when the volume has no recycle bin.** If the session directory sits on a network drive, a USB stick, or a volume with no usable recycle bin (such as FAT/exFAT), moving it to the recycle bin would degrade into permanent deletion, so the plugin always refuses. To proceed, move the session directory to a local disk, or delete any file on that volume once to initialise its recycle bin, and try again.
 - **An emptied recycle bin cannot be restored.** The plugin only moves the files into the bin; whether to empty it is the user's decision. The bin also has a size cap, and Windows discards the oldest entries once the quota is exceeded.
-- **A restored conversation may not be in its original workspace.** The plugin clears the workspace registry entry, so a restored conversation appears under "Ungrouped". To restore it to its original workspace, edit `~/.dsh/storages/workspace.json` by hand while DSH is stopped.
+- **A restored conversation may not be in its original workspace.** The plugin clears the workspace registry entry, so a restored conversation appears under "Ungrouped". To restore it to its original workspace, ask the AI assistant to update `~/.dsh/storages/workspace.json` while DSH is stopped.
 - **Attachments are not reclaimed.** DSH attachments are content-addressed, shared across conversations, and carry no reference counting, so the plugin cannot safely determine whether they can be reclaimed.
-- **On a failed delete, the reason text returned by the server also follows the interface language**: the server returns only an error code and parameters, and the interface text is resolved by the front end in the active language.
 - **The endpoint accepts loopback requests only.** `/api/session.delete` allows only `127.0.0.1` / `localhost` / `[::1]` and returns 403 for LAN origins. The plugin registers its route outside the official authentication fence, while the official browser-cookie check depends on a signing secret the plugin cannot obtain; deleting data is high-risk, so it fails closed. If DSH is bound to `0.0.0.0` and accessed from another machine, deletion returns 403.
 - **Nothing is touched when the session directory cannot be read.** A failed session-tree scan aborts the deletion as a whole and never treats "read failure" as "absent from disk".
 - The batch delete panel does not trap focus; `Tab` may move to page elements behind the panel.

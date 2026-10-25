@@ -20,7 +20,7 @@ const key = (id) => "session-" + norm(id);
 const why = (x) => (x ? [x.code ?? x.error, x.params && Object.keys(x.params).length ? JSON.stringify(x.params) : ""].filter(Boolean).join(" ") : "");
 
 const PROBE_EXPORTS = [
-  "collectSessionTree", "indexSessionsOnDisk", "findSessionDirs", "permanentSessionKeys",
+  "collectSessionTree", "indexSessionsOnDisk", "resolveSessionRoot", "permanentSessionKeys",
   "requestRejection", "recycleScript", "recycleBinMove", "isInside", "auditLeftover",
   "deleteSessionCore", "recycleIndexSnapshot", "recycleOriginalPath", "verifyRecycled", "salvageMoved",
   "recycledAll", "recycleBinUsable", "volumeRootOf",
@@ -87,8 +87,10 @@ if (!index0.ok) {
   try { fs.unlinkSync(probe); } catch {}
   process.exit(1);
 }
-const { byKey } = index0;
-const all = [...byKey.values()];
+const { entries } = index0;
+const all = entries;
+// 编号以 header 为权威，目录名可能是另一种写法，故按编号查条目时两种写法都认。
+const entryOf = (id) => entries.find((e) => e.id === id) ?? entries.find((e) => norm(e.id) === norm(id));
 const subs = all.filter((e) => e.header?.origin === "subagent");
 const roots = all.filter((e) => e.header && e.header.origin !== "subagent" && e.header.parentSession === undefined);
 
@@ -114,7 +116,7 @@ if (!top) {
   const t1 = collectSessionTree(ctx, top[0]);
   check("返回结构 ok", t1.ok === true, why(t1));
   const tree = t1.dirs ?? [];
-  const rootOnDisk = byKey.has(key(top[0]));
+  const rootOnDisk = entryOf(key(top[0])) !== undefined;
   const descendants = tree.length - (rootOnDisk ? 1 : 0);
   check("至少收全所有直接子代理", descendants >= top[1], `清单后代 ${descendants}，直接子代理 ${top[1]}`);
   check("无重复", new Set(tree).size === tree.length);
@@ -126,7 +128,7 @@ if (!top) {
   const pos = new Map(tree.map((d, i) => [key(path.basename(d)), i]));
   let orderBad = 0;
   for (const [k, i] of pos) {
-    const p = byKey.get(k)?.header?.parentSession;
+    const p = entryOf(k)?.header?.parentSession;
     if (typeof p === "string" && pos.has(key(p)) && pos.get(key(p)) < i) orderBad++;
   }
   check("顺序满足「父在子之后」", orderBad === 0, `违反 ${orderBad}`);
@@ -135,13 +137,13 @@ if (!top) {
     const k = key(path.basename(d));
     if (k === key(top[0])) return true;
     const seen = new Set([k]);
-    let p = byKey.get(k)?.header?.parentSession;
+    let p = entryOf(k)?.header?.parentSession;
     while (typeof p === "string" && p.length > 0) {
       const pk = key(p);
       if (pk === key(top[0])) return true;
       if (seen.has(pk)) return false;
       seen.add(pk);
-      p = byKey.get(pk)?.header?.parentSession;
+      p = entryOf(pk)?.header?.parentSession;
     }
     return false;
   });
@@ -181,8 +183,6 @@ console.log("\n[测试4] 磁盘清单读取失败时的保守行为");
   try {
     const idx = indexSessionsOnDisk();
     check("indexSessionsOnDisk 读失败 → ok:false", idx.ok === false && idx.code === "E_SESSION_ROOT_UNREADABLE", why(idx));
-    const dirs = mod.findSessionDirs("session-00000000-0000-0000-0000-000000000000");
-    check("findSessionDirs 读失败 → ok:false", dirs.ok === false && dirs.code === "E_SESSION_ROOT_UNREADABLE", why(dirs));
     const t4 = collectSessionTree(ctx, "session-00000000-0000-0000-0000-000000000000");
     check("collectSessionTree 读失败 → ok:false（放弃连带删除）", t4.ok === false && t4.code === "E_INDEX_UNREADABLE", why(t4));
   } finally {
@@ -294,7 +294,8 @@ console.log("\n[测试6.6] 回收站索引核对（真读 $Recycle.Bin，只读�
 
   // 差集语义：将当前索引整体作为 before 时新增为空，不应命中任何一条（旧项不得冒充本次搬移）。
   const none = mod.verifyRecycled(snap, ["C:\\no-such-session\\x"]);
-  check("差集为空时不误判（旧项不算这次新增）", none.matched === 0 && none.added === 0, JSON.stringify(none));
+  // 两次取样之间可能有其他进程往回收站写，故只断言「旧项不被算成本次新增」。
+  check("差集为空时不误判（旧项不算这次新增）", none.matched === 0, JSON.stringify(none));
 
   // 名字对不上即不应放行：宁可报失败，也不得将未搬成功者判为成功。
   const miss = mod.verifyRecycled(new Set(), ["C:\\no-such-session\\x"]);
@@ -310,7 +311,7 @@ console.log("\n[测试6.6] 回收站索引核对（真读 $Recycle.Bin，只读�
     const before = new Set(snap);
     before.delete(real.f);
     const hit = mod.verifyRecycled(before, [real.p]);
-    check("正例：真实回收站项能被认出来（matched=1）", hit.matched === 1 && hit.added === 1, `${JSON.stringify(hit)} ← ${real.p}`);
+    check("正例：真实回收站项能被认出来（matched=1）", hit.matched === 1 && hit.added >= 1, `${JSON.stringify(hit)} ← ${real.p}`);
     // 去重：同一条新增 $I 只计一个目标，否则将顶替另一个未搬移成功的目录（误报成功）。
     const dup = mod.verifyRecycled(before, [real.p, real.p]);
     check("去重：同路径当两个目标时 matched 只算 1", dup.matched === 1, JSON.stringify(dup));
@@ -468,6 +469,69 @@ console.log("\n[测试10] 整条删除流程（假 DSH_HOME + 假会话树，真
 
     const again = await mod.deleteSessionCore(ctx10, parentId);
     check("对已删除的会话再删一次 → 404，不报错也不重复搬", again.ok === false && again.status === 404 && again.code === "E_NOT_FOUND", why(again));
+  } finally {
+    process.env.DSH_HOME = saved;
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
+  }
+}
+
+console.log("\n[测试11] 同编号并存目录（假 DSH_HOME，真进回收站）");
+{
+  const saved = process.env.DSH_HOME;
+  const home = path.join(os.tmpdir(), `sd-dup-${process.pid}`);
+  const slugA = path.join(home, "sessions", "--F-dup-a--");
+  const slugB = path.join(home, "sessions", "--F-dup-b--");
+  const emptyDir = (slug, name) => {
+    const dir = path.join(slug, name);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const logDir = (slug, name, header) => {
+    const dir = path.join(slug, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "session.v4.jsonl.zstd"), zlib.zstdCompressSync(Buffer.from(JSON.stringify(header) + "\n", "utf8")));
+    return dir;
+  };
+  const bareCtx = { get: (n) => (n === "workspaceRegistry" ? { list: () => [], requireState: () => ({ archivedSessionIds: [] }) } : undefined), logger: { info: () => {}, warn: () => {}, debug: () => {} } };
+  fs.mkdirSync(slugA, { recursive: true });
+  fs.mkdirSync(slugB, { recursive: true });
+  process.env.DSH_HOME = home;
+  try {
+    const idA = "aaaaaaaa-0000-0000-0000-000000000001";
+    const bareA = emptyDir(slugA, idA);
+    const prefA = logDir(slugA, "session-" + idA, { type: "session", id: "session-" + idA, cwd: "F:\\dup" });
+    const rA = await mod.deleteSessionCore(bareCtx, idA);
+    check("请求裸名：只删空壳（事故回归）", rA.ok === true && rA.sessions === 1 && rA.recycled === 1, `sessions=${rA.sessions} recycled=${rA.recycled} ${why(rA)}`);
+    check("请求裸名：有内容的同号会话仍在磁盘", fs.existsSync(prefA) === true && fs.existsSync(bareA) === false);
+
+    const idB = "bbbbbbbb-0000-0000-0000-000000000002";
+    const prefB = emptyDir(slugA, "session-" + idB);
+    const bareB = logDir(slugA, idB, { type: "session", id: idB, cwd: "F:\\dup" });
+    const rB = await mod.deleteSessionCore(bareCtx, "session-" + idB);
+    check("请求带前缀：只删前缀空壳", rB.ok === true && rB.sessions === 1, `sessions=${rB.sessions} ${why(rB)}`);
+    check("请求带前缀：裸名有内容的会话仍在磁盘", fs.existsSync(bareB) === true && fs.existsSync(prefB) === false);
+
+    const idC = "cccccccc-0000-0000-0000-000000000003";
+    const c1 = emptyDir(slugA, idC);
+    const c2 = emptyDir(slugB, idC);
+    const rC = await mod.deleteSessionCore(bareCtx, idC);
+    check("同号目录分处两个工作区 → 拒绝删除", rC.ok === false && rC.code === "E_AMBIGUOUS_TARGET" && rC.status === 409, why(rC));
+    check("拒绝时两个目录都还在", fs.existsSync(c1) === true && fs.existsSync(c2) === true);
+
+    const idD = "dddddddd-0000-0000-0000-000000000004";
+    const d1 = logDir(slugA, "session-" + idD, { type: "session", id: "session-eeeeeeee-0000-0000-0000-000000000009", cwd: "F:\\dup" });
+    const rD = await mod.deleteSessionCore(bareCtx, "session-" + idD);
+    check("目录名对得上但 header 编号不符 → 不删", rD.ok === false && rD.code === "E_NOT_FOUND", why(rD));
+    check("编号不符的目录仍在磁盘", fs.existsSync(d1) === true);
+
+    const idE = "ffffffff-0000-0000-0000-000000000005";
+    const e1 = logDir(slugA, "odd-name-" + idE.slice(0, 8), { type: "session", id: "session-" + idE, cwd: "F:\\dup" });
+    const rE = await mod.deleteSessionCore(bareCtx, "session-" + idE);
+    check("目录名与编号不同、header 自证 → 删该目录", rE.ok === true && rE.sessions === 1 && fs.existsSync(e1) === false, why(rE));
+
+    const customLike = logDir(slugB, "custom-x", { type: "session", id: "custom-x", cwd: "F:\\dup" });
+    const idx2 = mod.indexSessionsOnDisk();
+    check("索引里的编号取自 header", idx2.ok === true && idx2.entries.some((e) => e.dir === customLike && e.id === "custom-x"), why(idx2));
   } finally {
     process.env.DSH_HOME = saved;
     try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
